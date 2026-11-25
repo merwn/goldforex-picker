@@ -28,7 +28,7 @@ def get_lan_ip() -> str:
 def main():
     ap = argparse.ArgumentParser(description="GoldForex.be - gold picker and arbitrage finder")
     ap.add_argument("--host", default="127.0.0.1")
-    ap.add_argument("--port", type=int, default=8010)
+    ap.add_argument("--port", type=int, default=8024)
     ap.add_argument("--phone", action="store_true", help="listen on 0.0.0.0 for phone/LAN access")
     ap.add_argument("--mode", choices=["auto", "http", "browser"], default="auto", help="scraping mode")
     ap.add_argument("--workers", type=int, default=5, help="parallel HTTP threads / Chrome windows")
