@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="100%" height="100%">
+  <defs>
+    <radialGradient id="goldEdge" cx="35%" cy="35%" r="65%">
+      <stop offset="0%" stop-color="#fff2a1"/>
+      <stop offset="40%" stop-color="#e0b44c"/>
+      <stop offset="75%" stop-color="#b88320"/>
+      <stop offset="100%" stop-color="#69460a"/>
+    </radialGradient>
+    <radialGradient id="goldInner" cx="40%" cy="40%" r="60%">
+      <stop offset="0%" stop-color="#ffd966"/>
+      <stop offset="50%" stop-color="#e0b44c"/>
+      <stop offset="100%" stop-color="#8c6114"/>
+    </radialGradient>
+    <filter id="shadow" x="-10%" y="-10%" width="130%" height="130%">
+      <feDropShadow dx="0" dy="16" stdDeviation="20" flood-color="#000000" flood-opacity="0.6"/>
+    </filter>
+  </defs>
+  <circle cx="256" cy="256" r="236" fill="url(#goldEdge)" filter="url(#shadow)"/>
+  <circle cx="256" cy="256" r="218" fill="none" stroke="#69460a" stroke-width="3" stroke-dasharray="8 8"/>
+  <circle cx="256" cy="256" r="202" fill="url(#goldInner)"/>
+  <circle cx="256" cy="256" r="186" fill="none" stroke="#fff2a1" stroke-width="2" stroke-opacity="0.4"/>
+  <text x="256" y="278" font-family="system-ui, -apple-system, sans-serif" font-size="110" font-weight="900" fill="#3a2503" text-anchor="middle" letter-spacing="2">Au</text>
+  <text x="256" y="326" font-family="system-ui, -apple-system, sans-serif" font-size="28" font-weight="700" fill="#69460a" text-anchor="middle" letter-spacing="6">999.9</text>
+  <path d="M 170 380 Q 256 410 342 380" fill="none" stroke="#69460a" stroke-width="4" stroke-linecap="round"/>
+</svg>
+

@@ -1,0 +1,19 @@
+{
+  "name": "GoldForex Picker & Gold Arbitrage",
+  "short_name": "GoldForex",
+  "description": "Gold bullion and coin deal comparison, arbitrage scanner, and portfolio vault",
+  "start_url": "/",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#0e1014",
+  "theme_color": "#e0b44c",
+  "icons": [
+    {
+      "src": "/static/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}
+

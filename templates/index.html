@@ -1,0 +1,447 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+  <title>GoldForex picker & Gold Arbitrage</title>
+  <link rel="manifest" href="/manifest.json">
+  <meta name="theme-color" content="#e0b44c">
+  <link rel="icon" type="image/svg+xml" href="/static/icon.svg">
+  <link rel="apple-touch-icon" href="/static/icon.svg">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="GoldForex">
+  <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+<header>
+  <h1>GoldForex.be - gold picker</h1>
+  <span class="badge" style="background:#e0b44c20;border:1px solid var(--gold);color:var(--gold);font-size:12px;padding:3px 9px;border-radius:12px;font-weight:600">🎯 Coins &amp; Bars &lt; 1,000 €</span>
+  <span id="age-badge" class="b-age b-live" style="display:none">● Live</span>
+  <span class="mut" id="meta">loading...</span>
+</header>
+
+<div class="bar">
+  <button data-f="all" class="on">All</button>
+  <button data-f="bar">Bars</button>
+  <button data-f="coin">Coins</button>
+  <button data-f="fav" id="fav-filter" title="Show starred favourites only">⭐ Favourites</button>
+  <label class="mut"><input type="checkbox" id="stock" checked> in stock only</label>
+  <label class="mut">Budget min <input type="number" id="bmin" min="0" step="50" placeholder="EUR"></label>
+  <label class="mut">max <input type="number" id="bmax" min="0" step="50" placeholder="EUR"></label>
+  <label class="mut">Sort <select id="sort">
+    <option value="deal">⭐ Best Deal Score</option>
+    <option value="loss">Lowest loss when selling</option>
+    <option value="pure">Cheapest per pure gram</option>
+    <option value="breakeven">Lowest break-even spot</option>
+    <option value="price">Price: low to high</option>
+    <option value="gold">Most pure gold</option>
+  </select></label>
+  <button data-v="cards" class="on">Cards</button>
+  <button data-v="table">Table</button>
+  <button id="wallet-nav-btn" class="on" title="View &amp; track your personal physical gold portfolio">💼 My Wallet <span id="wallet-badge" class="badge b-in" style="display:none;padding:1px 5px;font-size:10px">0</span></button>
+  <button id="basket-btn" title="Optimize purchase allocation for your exact budget">🧺 Basket Optimizer</button>
+  <button id="dealer-btn" title="Compare live prices with BullionByPost.eu">🏪 Dealer Compare</button>
+  <button id="sw-btn" title="Toggle scatter plot of resale loss vs weight">📈 Sweet Spot Chart</button>
+  <button id="alerts-btn" title="Manage price &amp; stock alerts">🔔 Alerts <span id="alerts-count" class="badge b-in" style="display:none;padding:1px 5px;font-size:10px">0</span></button>
+  <button id="weights-btn" title="Adjust Deal Score weights">⚖️ Weights</button>
+  <button id="refresh">Refresh prices</button>
+  <button id="rescan" title="Re-read all pages of the buy-gold listing with Chrome">Rescan</button>
+  <label class="mut"><input type="checkbox" id="auto"> auto (60 s)</label>
+  <a href="/api/export.csv"><button>CSV</button></a>
+  <span style="position:relative;margin-left:auto">
+    <button id="setbtn">Settings</button>
+    <div class="pop" id="settings">
+      <label><input type="checkbox" id="silent" checked> Silent browsing (hidden Chrome)</label>
+      <div class="note">Hides the Chrome windows used for the product list, price history, gold price and the price fallback. Prices are normally read over plain HTTP, with no window at all. Untick it if the site shows a bot check, solve it once in the window, then tick it again.</div>
+    </div>
+  </span>
+</div>
+
+<div class="bar2">
+  <input type="text" id="search" placeholder="🔍 Search name, country, weight..." style="width:260px">
+  <select id="fcountry"><option value="">All countries</option></select>
+  <select id="fkarat">
+    <option value="">All karats</option>
+    <option value="24">24 K (99.9%)</option>
+    <option value="22">22 K (91.6%)</option>
+    <option value="21.6">21.6 K (90.0%)</option>
+  </select>
+  <select id="fweight">
+    <option value="">All weights</option>
+    <option value="u5">≤ 5 g</option>
+    <option value="5-20">5 g – 20 g</option>
+    <option value="20-35">20 g – 35 g (1 oz)</option>
+    <option value="50-100">50 g – 100 g</option>
+    <option value="o100">&gt; 100 g</option>
+  </select>
+  <button id="clear-filters" class="mut">Clear filters</button>
+  <span class="mut" id="shown" style="margin-left:auto"></span>
+</div>
+
+<div class="err" id="err"></div>
+
+<main>
+  <section class="spot" id="spot">loading the gold price...</section>
+
+  <!-- Investment Wallet Dashboard Section -->
+  <section class="wallet-dashboard-section" id="wallet-dashboard">
+    <div class="wallet-dash-header">
+      <div class="wallet-dash-title-wrap">
+        <div class="wallet-dash-title">
+          <span style="font-size:22px">💼</span>
+          <h2>My Investment Wallet</h2>
+          <span class="badge b-in" id="wallet-items-count">0 items</span>
+        </div>
+        <div class="wallet-dash-sub">
+          Live investment tracking comparing your purchase price &amp; exact buy time against real-time GoldForex selling prices.
+        </div>
+      </div>
+      <div class="wallet-header-actions">
+        <button id="w-add-btn" class="on">+ Add Coin / Bar</button>
+        <button id="w-toggle-view" class="mut" title="Toggle table/grid view">Full Details</button>
+        <button id="w-backup-btn" class="mut" title="Export wallet as JSON file">Backup</button>
+        <button id="w-restore-btn" class="mut" title="Restore wallet from JSON file">Restore</button>
+        <input type="file" id="w-file-input" style="display:none" accept=".json">
+      </div>
+    </div>
+
+    <!-- Portfolio KPI Cards -->
+    <div class="wallet-kpi-grid" id="wallet-kpi-grid"></div>
+
+    <!-- Holdings List / Table -->
+    <div class="wallet-holdings-container" id="wallet-holdings-container"></div>
+  </section>
+
+  <section class="sweetspot-wrap" id="sw-wrap" style="display:none">
+    <div class="sw-head">
+      <div>
+        <h2>📈 Premium Sweet Spot Chart (Resale Loss % vs Weight)</h2>
+        <div class="mut">Scatter plot of resale loss % against item weight. Small items (1g–10g) carry steep losses, flattening near 20g–1 oz. Hover for details, click a dot to highlight product below.</div>
+      </div>
+      <div class="sw-controls">
+        <label class="mut"><input type="checkbox" id="sw-log" checked> Logarithmic weight scale</label>
+        <button id="sw-close">Hide chart</button>
+      </div>
+    </div>
+    <div class="sw-chart-box" id="sw-chart-box">
+      <div class="sw-tip" id="sw-tip"></div>
+      <svg id="sw-svg" viewBox="0 0 920 320" preserveAspectRatio="none"></svg>
+    </div>
+    <div class="sw-legend">
+      <span><i style="background:#e0b44c;transform:rotate(45deg)"></i> Bar</span>
+      <span><i style="background:#4cc38a;border-radius:50%"></i> Bullion Coin</span>
+      <span><i style="background:#e0884c;border-radius:50%"></i> Collector Coin</span>
+      <span><i style="background:transparent;border:2px solid #8b909c;border-radius:50%"></i> Out of stock</span>
+      <span><i style="background:#4cc38a33;border:1px dashed #4cc38a"></i> Sweet Spot Zone (&lt; 4.5% loss)</span>
+    </div>
+  </section>
+
+  <section class="picks" id="picks"></section>
+  <div id="view"></div>
+</main>
+
+<!-- Floating Comparison Dock -->
+<div class="compare-dock" id="compare-bar" style="display:none">
+  <div class="cmp-left">
+    <span style="font-weight:700;color:var(--gold)">⚖️ Compare</span>
+    <div id="compare-thumbs" class="cmp-thumbs"></div>
+    <span id="compare-count" class="mut" style="font-size:12px">0 items</span>
+  </div>
+  <div class="cmp-right">
+    <button id="compare-open" class="on">View Comparison</button>
+    <button id="compare-clear" class="mut">Clear</button>
+  </div>
+</div>
+
+<!-- Side-by-Side Product Comparison Modal -->
+<div class="modal" id="compare-modal">
+  <div class="mbox" style="width:min(1250px, 98vw)">
+    <div class="mhead">
+      <div>
+        <div style="font-weight:700;font-size:17px;color:var(--gold)">⚖️ Side-by-Side Product Comparison</div>
+        <div class="mut" style="font-size:12px">Directly compare spreads, prices per pure gram, spot markups, and break-even thresholds.</div>
+      </div>
+      <button id="cmp-close">✕</button>
+    </div>
+    <div id="compare-content" style="overflow-x:auto;margin-top:12px"></div>
+  </div>
+</div>
+
+<!-- "My Gold Wallet" Add / Edit Investment Modal -->
+<div class="modal" id="wallet-modal">
+  <div class="mbox" style="width:min(680px, 98vw)">
+    <div class="mhead">
+      <div>
+        <div id="w-modal-title" style="font-weight:700;font-size:17px;color:var(--gold)">➕ Add Gold Coin or Bar to Wallet</div>
+        <div class="mut" style="font-size:12px">Log a purchase with your exact buy time and price to track win/loss against live selling rates.</div>
+      </div>
+      <button id="w-modal-close">✕</button>
+    </div>
+
+    <form id="wallet-form" onsubmit="return false;" style="margin-top:14px;display:grid;gap:14px">
+      <!-- Product Selection from items < 1000 EUR -->
+      <div>
+        <label class="mut" style="font-size:12px;font-weight:600;display:block;margin-bottom:5px">Select Product from Store (&lt; 1,000 €)</label>
+        <select id="w-form-product" style="width:100%;font-size:14px;padding:8px">
+          <option value="">-- Choose from catalog or enter custom --</option>
+        </select>
+      </div>
+
+      <!-- Item Name & Category -->
+      <div style="display:grid;grid-template-columns: 1.5fr 1fr;gap:12px">
+        <div>
+          <label class="mut" style="font-size:12px;font-weight:600;display:block;margin-bottom:5px">Item Name</label>
+          <input type="text" id="w-form-name" placeholder="e.g. Napoleon 20 francs" required style="width:100%">
+        </div>
+        <div>
+          <label class="mut" style="font-size:12px;font-weight:600;display:block;margin-bottom:5px">Category</label>
+          <select id="w-form-category" style="width:100%">
+            <option value="coin">Coin</option>
+            <option value="bar">Bar</option>
+          </select>
+        </div>
+      </div>
+
+      <!-- Exact Buy Date & Time -->
+      <div>
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:5px">
+          <label class="mut" style="font-size:12px;font-weight:600">Exact Purchase Date &amp; Time</label>
+          <div style="display:flex;gap:4px">
+            <button type="button" class="w-time-btn" data-preset="now">Now</button>
+            <button type="button" class="w-time-btn" data-preset="yesterday">Yesterday</button>
+            <button type="button" class="w-time-btn" data-preset="1week">1W Ago</button>
+            <button type="button" class="w-time-btn" data-preset="1month">1M Ago</button>
+          </div>
+        </div>
+        <input type="datetime-local" id="w-form-datetime" required style="width:100%;font-size:14px;padding:8px">
+      </div>
+
+      <!-- Purchase Price, Quantity, Pure Gold -->
+      <div style="display:grid;grid-template-columns: 1.3fr 0.8fr 1fr;gap:12px">
+        <div>
+          <label class="mut" style="font-size:12px;font-weight:600;display:block;margin-bottom:5px">Purchase Price / Unit (€)</label>
+          <input type="number" id="w-form-price" step="0.01" min="0" placeholder="e.g. 620.00" required style="width:100%;font-size:15px;font-weight:700">
+        </div>
+        <div>
+          <label class="mut" style="font-size:12px;font-weight:600;display:block;margin-bottom:5px">Quantity</label>
+          <input type="number" id="w-form-qty" step="1" min="1" value="1" required style="width:100%;font-size:15px;font-weight:700">
+        </div>
+        <div>
+          <label class="mut" style="font-size:12px;font-weight:600;display:block;margin-bottom:5px">Pure Gold (g/unit)</label>
+          <input type="number" id="w-form-pure" step="0.001" min="0" placeholder="e.g. 5.805" style="width:100%;font-size:14px">
+        </div>
+      </div>
+
+      <!-- Dynamic Live Win/Loss Preview Box -->
+      <div id="w-form-preview" class="w-live-preview">
+        <span class="mut">Select a product to view real-time liquidation value &amp; estimated win/loss.</span>
+      </div>
+
+      <!-- Notes / Location -->
+      <div>
+        <label class="mut" style="font-size:12px;font-weight:600;display:block;margin-bottom:5px">Notes / Invoice / Storage (Optional)</label>
+        <input type="text" id="w-form-notes" placeholder="e.g. Purchased in Brussels counter, Mint state" style="width:100%">
+      </div>
+
+      <input type="hidden" id="w-form-id">
+
+      <!-- Form Actions -->
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-top:10px">
+        <button type="button" id="w-form-del" style="color:var(--r);border-color:#611919;display:none">Delete Holding</button>
+        <div style="display:flex;gap:10px;margin-left:auto">
+          <button type="button" id="w-form-cancel">Cancel</button>
+          <button type="submit" id="w-form-save" class="on" style="padding:8px 20px;font-weight:700">💾 Save Holding</button>
+        </div>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- Budget Basket Optimizer Modal -->
+<div class="modal" id="basket-modal">
+  <div class="mbox" style="width:min(900px, 98vw)">
+    <div class="mhead">
+      <div>
+        <div style="font-weight:700;font-size:17px;color:var(--gold)">🧺 Budget Basket Optimizer</div>
+        <div class="mut" style="font-size:12px">Find the mathematically optimal mix of in-stock gold bars and coins for your exact budget.</div>
+      </div>
+      <button id="bkt-close">✕</button>
+    </div>
+
+    <!-- Inputs -->
+    <div style="background:var(--card2);border:1px solid var(--line);border-radius:10px;padding:16px;margin:12px 0;display:grid;gap:14px">
+      <div style="display:flex;flex-wrap:wrap;gap:16px;align-items:flex-end">
+        <div>
+          <label class="mut" style="font-size:12px;display:block;margin-bottom:4px">Your Investment Budget (€)</label>
+          <div style="display:flex;gap:6px;align-items:center">
+            <input type="number" id="bkt-budget" min="100" step="50" value="3000" style="width:140px;font-size:16px;font-weight:700">
+            <span class="mut">EUR</span>
+          </div>
+        </div>
+        <div style="display:flex;gap:6px;flex-wrap:wrap">
+          <button class="bkt-preset" data-b="1000">€1,000</button>
+          <button class="bkt-preset" data-b="2500">€2,500</button>
+          <button class="bkt-preset" data-b="5000">€5,000</button>
+          <button class="bkt-preset" data-b="10000">€10,000</button>
+        </div>
+      </div>
+
+      <div style="display:flex;flex-wrap:wrap;gap:16px;align-items:center">
+        <div>
+          <label class="mut" style="font-size:12px;display:block;margin-bottom:4px">Optimization Strategy</label>
+          <select id="bkt-strat">
+            <option value="pure">🥇 Maximum Pure Gold (Most grams for budget)</option>
+            <option value="loss">🛡️ Lowest Resale Loss (Cheapest exit spread)</option>
+          </select>
+        </div>
+        <div>
+          <label class="mut" style="font-size:12px;display:block;margin-bottom:4px">Category Filter</label>
+          <select id="bkt-type">
+            <option value="all">All in-stock gold</option>
+            <option value="coin">Coins only</option>
+            <option value="bar">Bars only</option>
+          </select>
+        </div>
+        <div>
+          <label class="mut" style="font-size:12px;display:block;margin-bottom:4px">Max copies per item</label>
+          <select id="bkt-max-copies">
+            <option value="3">Max 3 of same</option>
+            <option value="5">Max 5 of same</option>
+            <option value="1">1 of each (Diversified)</option>
+            <option value="99">Unlimited</option>
+          </select>
+        </div>
+        <button id="bkt-run" class="on" style="margin-left:auto;padding:8px 18px;font-weight:700">⚡ Calculate Best Basket</button>
+      </div>
+    </div>
+
+    <!-- Results Area -->
+    <div id="bkt-results"></div>
+  </div>
+</div>
+
+<!-- Competitor Dealer Arbitrage Modal -->
+<div class="modal" id="dealer-modal">
+  <div class="mbox" style="width:min(1050px, 98vw)">
+    <div class="mhead">
+      <div>
+        <div style="font-weight:700;font-size:17px;color:var(--gold)">🏪 Dealer Price Comparison — GoldForex vs BullionByPost</div>
+        <div class="mut" style="font-size:12px">Benchmark standard bullion coins &amp; bars against BullionByPost.eu (major European precious metals dealer).</div>
+      </div>
+      <div style="display:flex;gap:8px">
+        <button id="dealer-refresh">Reload Competitor</button>
+        <button id="dealer-close">✕</button>
+      </div>
+    </div>
+    <div id="dealer-content" style="margin-top:14px"></div>
+  </div>
+</div>
+
+<!-- Price History Chart Modal -->
+<div class="modal" id="modal">
+  <div class="mbox">
+    <div class="mhead">
+      <div>
+        <div id="mtitle" style="font-weight:650;font-size:16px"></div>
+        <div class="mut" id="msub"></div>
+      </div>
+      <div style="display:flex;gap:8px;align-items:center">
+        <div class="rng" id="rng"></div>
+        <button id="mreload" title="Re-read the history from the site">Reload</button>
+        <button id="mclose">Close</button>
+      </div>
+    </div>
+    <div id="mbody"></div>
+  </div>
+</div>
+
+<!-- Deal Score Weights Modal -->
+<div class="modal" id="weights-modal">
+  <div class="mbox mbox-sm">
+    <div class="mhead">
+      <div style="font-weight:650;font-size:16px;color:var(--gold)">⚖️ Deal Score Weights</div>
+      <button id="w-close">✕</button>
+    </div>
+    <p class="mut" style="font-size:13px">Customize how the Deal Score (0–100) balances resale spread, spot premium, and price per pure gram.</p>
+    <div style="display:grid;gap:16px;margin:18px 0">
+      <div>
+        <div style="display:flex;justify-content:space-between;margin-bottom:4px"><span>Resale Loss % Weight</span><b id="w-loss-val">45%</b></div>
+        <input type="range" id="w-loss" min="0" max="100" value="45" style="width:100%">
+      </div>
+      <div>
+        <div style="display:flex;justify-content:space-between;margin-bottom:4px"><span>Spot Premium % Weight</span><b id="w-prem-val">35%</b></div>
+        <input type="range" id="w-prem" min="0" max="100" value="35" style="width:100%">
+      </div>
+      <div>
+        <div style="display:flex;justify-content:space-between;margin-bottom:4px"><span>Price / Pure Gram Weight</span><b id="w-pure-val">20%</b></div>
+        <input type="range" id="w-pure" min="0" max="100" value="20" style="width:100%">
+      </div>
+    </div>
+    <div style="display:flex;gap:10px;justify-content:flex-end">
+      <button id="w-reset" class="mut">Reset defaults</button>
+      <button id="w-save" class="on">Apply & Save</button>
+    </div>
+  </div>
+</div>
+
+<!-- Single Item Alert Modal -->
+<div class="modal" id="alt-modal">
+  <div class="mbox mbox-sm">
+    <div class="mhead">
+      <div id="alt-title" style="font-weight:650;font-size:16px;color:var(--gold)">Set Alert</div>
+      <button id="alt-close">✕</button>
+    </div>
+    <div id="alt-desc" class="mut" style="font-size:13px;margin-bottom:14px"></div>
+    <div style="display:grid;gap:12px">
+      <label style="display:flex;align-items:center;gap:10px">
+        <input type="checkbox" id="alt-stock"> <span>Alert when <b>Back in stock</b></span>
+      </label>
+      <label style="display:grid;gap:4px">
+        <span class="mut" style="font-size:12px">Alert when Pay Price drops below:</span>
+        <div style="display:flex;gap:8px;align-items:center">
+          <input type="number" id="alt-price" placeholder="EUR" step="1" style="flex:1"> <span class="mut">EUR</span>
+        </div>
+      </label>
+      <label style="display:grid;gap:4px">
+        <span class="mut" style="font-size:12px">Alert when Resale Loss % drops below:</span>
+        <div style="display:flex;gap:8px;align-items:center">
+          <input type="number" id="alt-loss" placeholder="%" step="0.1" style="flex:1"> <span class="mut">%</span>
+        </div>
+      </label>
+    </div>
+    <div style="display:flex;gap:10px;justify-content:space-between;margin-top:18px">
+      <button id="alt-delete" style="color:var(--r);border-color:#611919;display:none">Delete alert</button>
+      <div style="display:flex;gap:10px;margin-left:auto">
+        <button id="alt-cancel">Cancel</button>
+        <button id="alt-save" class="on">Save Alert</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Alerts Manager Modal -->
+<div class="modal" id="mgr-modal">
+  <div class="mbox mbox-sm">
+    <div class="mhead">
+      <div style="font-weight:650;font-size:16px;color:var(--gold)">🔔 Active Alerts</div>
+      <button id="mgr-close">✕</button>
+    </div>
+    <div style="display:flex;gap:10px;margin-bottom:12px">
+      <button id="mgr-test-sound">🔊 Test chime</button>
+      <button id="mgr-req-notif">Allow notifications</button>
+    </div>
+    <div id="mgr-list" style="max-height:360px;overflow-y:auto;border:1px solid var(--line);border-radius:8px"></div>
+    <div style="display:flex;justify-content:flex-end;margin-top:14px">
+      <button id="mgr-clear" class="mut">Clear all alerts</button>
+    </div>
+  </div>
+</div>
+
+<div class="toast-wrap" id="toasts"></div>
+
+<!-- External Lightweight Charts & Application Scripts -->
+<script src="/lwc.js"></script>
+<script src="/static/js/app.js"></script>
+</body>
+</html>
