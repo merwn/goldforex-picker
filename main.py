@@ -11,7 +11,6 @@ import webbrowser
 import uvicorn
 
 import config
-from app import app
 
 
 def get_lan_ip() -> str:
@@ -40,21 +39,27 @@ def main():
     ap.add_argument("--no-open", action="store_true", help="do not auto-open the browser on startup")
     args = ap.parse_args()
 
+    # Load persistent settings first before applying CLI overrides
+    config.load_settings()
+
     if args.phone:
         args.host = "0.0.0.0"
 
     config.MODE = args.mode
     config.WORKERS = args.workers
     config.USE_UC = args.uc
-    config.load_settings()
 
     if args.headless:
         config.HEADLESS = True
-    if args.show_browser:
+    elif args.show_browser:
         config.HEADLESS = False
+
     if args.all_metals:
         config.LISTING_FILTER = ""
         config.PRODUCTS_FILE.unlink(missing_ok=True)
+
+    # Import app after configuration is initialized
+    from app import app
 
     url = f"http://{'127.0.0.1' if args.host == '0.0.0.0' else args.host}:{args.port}"
     if not args.no_open:
@@ -62,9 +67,11 @@ def main():
 
     lan_ip = get_lan_ip()
     print(f"GoldForex picker at {url}  (mode={config.MODE}, workers={config.WORKERS}, silent={config.HEADLESS}, "
-          f"http client={'curl_cffi/chrome' if config.cffi_requests else 'requests'})")
+          f"http client={'curl_cffi/chrome' if config.cffi_requests else 'requests'})", flush=True)
     if args.host in ("0.0.0.0", "127.0.0.1", "localhost"):
-        print(f"  > Phone / LAN access: http://{lan_ip}:{args.port} (run with --phone or --host 0.0.0.0)")
+        print(f"  > Phone / LAN access: http://{lan_ip}:{args.port} (run with --phone or --host 0.0.0.0)", flush=True)
+    if args.host == "0.0.0.0" or args.phone:
+        print("  ! WARNING: Listening on 0.0.0.0 with no authentication. Anyone on your local network can access the dashboard.", flush=True)
 
     uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
 

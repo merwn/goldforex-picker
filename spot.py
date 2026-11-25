@@ -16,11 +16,8 @@ from datetime import datetime
 from bs4 import BeautifulSoup
 
 from browser import BrowserPool, pool as default_pool
+import config
 from config import (
-    CACHE_FILE,
-    HTTP_TIMEOUT,
-    SPOT_TTL,
-    SPOT_URL,
     YAHOO_FX_URL,
     YAHOO_GOLD_URL,
     ParseError,
@@ -96,13 +93,13 @@ def fetch_spot(p: BrowserPool = default_pool) -> dict:
     last: Exception | None = None
     # 1) Try bullionbypost via plain HTTP
     try:
-        r = get_session().get(SPOT_URL, timeout=HTTP_TIMEOUT)
+        r = get_session().get(config.SPOT_URL, timeout=config.HTTP_TIMEOUT)
         r.raise_for_status()
         d = parse_spot(r.text)
         if d:
             d["via"] = "http"
             d["source"] = "bullionbypost.eu"
-            d["url"] = SPOT_URL
+            d["url"] = config.SPOT_URL
             return d
         last = ParseError("price not found in the bullionbypost page")
     except Exception as exc:
@@ -118,21 +115,21 @@ def fetch_spot(p: BrowserPool = default_pool) -> dict:
         from selenium.webdriver.support.ui import WebDriverWait
         p.ensure(1)
         with p.borrow() as drv:
-            drv.get(SPOT_URL)
+            drv.get(config.SPOT_URL)
             WebDriverWait(drv, 10, poll_frequency=0.4).until(lambda d: parse_spot(d.page_source) is not None)
             d = parse_spot(drv.page_source)
         if d:
             d["via"] = "browser"
             d["source"] = "bullionbypost.eu (browser)"
-            d["url"] = SPOT_URL
+            d["url"] = config.SPOT_URL
             return d
     except Exception as exc:
         last = exc
 
     # 4) Fallback to shop implied spot from last scrape cache
     try:
-        if CACHE_FILE.exists():
-            cached = json.loads(CACHE_FILE.read_text(encoding="utf-8"))
+        if config.CACHE_FILE.exists():
+            cached = json.loads(config.CACHE_FILE.read_text(encoding="utf-8"))
             if cached and cached.get("rows"):
                 meds = [r.get("implied_spot_per_g") for r in cached["rows"] if r.get("implied_spot_per_g")]
                 if meds:
@@ -157,13 +154,13 @@ _spot_lock = threading.Lock()
 def get_spot(refresh: bool = False, p: BrowserPool = default_pool) -> dict:
     with _spot_lock:
         c = _spot_cache.get("v")
-        if c and not refresh and time.time() - c["_t"] < SPOT_TTL:
+        if c and not refresh and time.time() - c["_t"] < config.SPOT_TTL:
             return c["data"]
         data = fetch_spot(p)
         if "source" not in data:
             data["source"] = "bullionbypost.eu"
         if "url" not in data:
-            data["url"] = SPOT_URL
+            data["url"] = config.SPOT_URL
         data["fetched_at"] = datetime.now().isoformat(timespec="seconds")
         _spot_cache["v"] = {"_t": time.time(), "data": data}
         return data

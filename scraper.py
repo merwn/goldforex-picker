@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import re
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
@@ -14,23 +15,15 @@ from urllib.parse import urljoin
 from bs4 import BeautifulSoup
 
 from browser import BrowserPool, discover_urls, pool as default_pool
+import config
 from config import (
     BROWSER_TIMEOUT,
-    CACHE_FILE,
     CHART_DIR,
-    COMPETITORS_FILE,
     COUNTRY_HINTS,
     FALLBACK_URLS,
     HTTP_RETRIES,
     HTTP_TIMEOUT,
-    LISTING_FILTER,
-    MAX_PRICE,
-    MODE,
     PRICE_SELECTOR,
-    PRODUCT_URLS,
-    PRODUCTS_FILE,
-    PRODUCTS_TTL,
-    WORKERS,
     BlockedError,
     ParseError,
     get_session,
@@ -38,6 +31,63 @@ from config import (
     set_products,
 )
 from spot import parse_money
+
+try:
+    from zoneinfo import ZoneInfo
+    BRUSSELS_TZ = ZoneInfo("Europe/Brussels")
+except Exception:
+    BRUSSELS_TZ = None
+
+# Known coin reference specifications: (pattern, purity_pct, gross_weight_g, pure_gold_g)
+KNOWN_COIN_DATA = [
+    (r"1\s*ducat", 98.6, 3.49, 3.44),
+    (r"4\s*ducat", 98.6, 13.96, 13.76),
+    (r"1/10\s*(?:oz|ounce)?\s*krugerrand", 91.67, 3.393, 3.1103),
+    (r"1/4\s*(?:oz|ounce)?\s*krugerrand", 91.67, 8.482, 7.7759),
+    (r"1/2\s*(?:oz|ounce)?\s*krugerrand", 91.67, 16.965, 15.5517),
+    (r"1\s*(?:oz|ounce)?\s*krugerrand", 91.67, 33.93, 31.1035),
+    (r"1/10\s*(?:oz|ounce)?\s*maple\s*leaf", 99.99, 3.1103, 3.1103),
+    (r"1/4\s*(?:oz|ounce)?\s*maple\s*leaf", 99.99, 7.7759, 7.7759),
+    (r"1/2\s*(?:oz|ounce)?\s*maple\s*leaf", 99.99, 15.5517, 15.5517),
+    (r"1\s*(?:oz|ounce)?\s*maple\s*leaf", 99.99, 31.1035, 31.1035),
+    (r"1/10\s*(?:oz|ounce)?\s*eagle", 91.67, 3.393, 3.1103),
+    (r"1/4\s*(?:oz|ounce)?\s*eagle", 91.67, 8.482, 7.7759),
+    (r"1/2\s*(?:oz|ounce)?\s*eagle", 91.67, 16.965, 15.5517),
+    (r"1\s*(?:oz|ounce)?\s*eagle", 91.67, 33.93, 31.1035),
+    (r"1/10\s*(?:oz|ounce)?\s*phil+ar?moni", 99.99, 3.1103, 3.1103),
+    (r"1/4\s*(?:oz|ounce)?\s*phil+ar?moni", 99.99, 7.7759, 7.7759),
+    (r"1/2\s*(?:oz|ounce)?\s*phil+ar?moni", 99.99, 15.5517, 15.5517),
+    (r"1\s*(?:oz|ounce)?\s*phil+ar?moni", 99.99, 31.1035, 31.1035),
+    (r"1/10\s*(?:oz|ounce)?\s*britannia", 99.99, 3.1103, 3.1103),
+    (r"1/4\s*(?:oz|ounce)?\s*britannia", 99.99, 7.7759, 7.7759),
+    (r"1/2\s*(?:oz|ounce)?\s*britannia", 99.99, 15.5517, 15.5517),
+    (r"1\s*(?:oz|ounce)?\s*britannia", 99.99, 31.1035, 31.1035),
+    (r"1/10\s*(?:oz|ounce)?\s*panda", 99.9, 3.1103, 3.1103),
+    (r"1/4\s*(?:oz|ounce)?\s*panda", 99.9, 7.7759, 7.7759),
+    (r"10\s*deutsche\s*mark", 90.0, 3.982, 3.584),
+    (r"20\s*deutsche\s*mark", 90.0, 7.965, 7.1685),
+    (r"20\s*(?:francs|frs|frank|lires|lire)", 90.0, 6.45, 5.805),
+    (r"10\s*(?:francs|frs|frank)", 90.0, 3.225, 2.9025),
+    (r"50\s*pesos", 90.0, 41.666, 37.5),
+    (r"20\s*pesos", 90.0, 16.666, 15.0),
+    (r"10\s*pesos", 90.0, 8.333, 7.5),
+    (r"5\s*pesos", 90.0, 4.166, 3.75),
+    (r"2[.,]5\s*pesos", 90.0, 2.083, 1.875),
+    (r"2\s*pesos", 90.0, 1.666, 1.5),
+    (r"10\s*gulden", 90.0, 6.729, 6.056),
+    (r"5\s*gulden", 90.0, 3.364, 3.028),
+    (r"vreneli", 90.0, 6.45, 5.805),
+    (r"sovereign\s*1/2|half\s*sovereign", 91.67, 3.99, 3.6588),
+    (r"sovereign", 91.67, 7.988, 7.322),
+]
+
+FRACTIONAL_OUNCES = [
+    (r"1/10\s*(?:oz|ounce)", 3.1103),
+    (r"1/4\s*(?:oz|ounce)", 7.7759),
+    (r"1/2\s*(?:oz|ounce)", 15.5517),
+    (r"1\s*(?:oz|ounce)", 31.1035),
+    (r"2\s*(?:oz|ounce)", 62.207),
+]
 
 
 def first_number(text: str) -> float | None:
@@ -93,19 +143,78 @@ def parse_product(html: str, url: str) -> dict:
     sold_out = any(k in block_txt for k in ("indisponible", "notify me when", "out of stock", "rupture"))
     in_stock = (soup.select_one("p.instock") is not None) and not sold_out
 
+    h1 = soup.select_one("h1[itemprop=name] span") or soup.select_one("h1")
+    name = h1.get_text(strip=True) if h1 else url.rsplit("/", 1)[-1]
+    name_low = name.lower()
+
     feats = {}
     for li in soup.select("#tab-features li"):
         lab, val = li.find("label"), li.select_one(".fvalue")
         if lab and val:
             feats[lab.get_text(strip=True).lower()] = val.get_text(" ", strip=True)
+
+    ptype = feats.get("type of products", "").strip().lower()
+    category = ptype if ptype in ("bar", "coin") else ("bar" if "bar" in url or "ingot" in url else "coin")
+
     w1, w2 = first_number(feats.get("net weight", "")), first_number(feats.get("gross weight", ""))
-    weights = [w for w in (w1, w2) if w]
-    purity = first_number(feats.get("purity", ""))
-    purity_pct = (purity / 10 if purity and purity > 100 else purity)
+    weights = [w for w in (w1, w2) if w and w > 0]
+    purity_raw = first_number(feats.get("purity", ""))
+
+    purity_pct = None
+    if purity_raw is not None and purity_raw > 0:
+        if purity_raw <= 1.0:
+            purity_pct = purity_raw * 100.0
+        elif purity_raw > 100.0:
+            purity_pct = purity_raw / 10.0
+        else:
+            purity_pct = purity_raw
+
     weight_g = max(weights) if weights else None
     pure_g = min(weights) if weights else None
     if weight_g and purity_pct:
-        pure_g = weight_g * purity_pct / 100
+        pure_g = weight_g * purity_pct / 100.0
+
+    # Fallback weight and purity from known coin database and name regex
+    matched_known = False
+    for pat, k_pur, k_gross, k_pure in KNOWN_COIN_DATA:
+        if re.search(pat, name_low):
+            matched_known = True
+            if purity_pct is None or purity_pct < 1.0 or purity_pct > 100.0:
+                purity_pct = k_pur
+            if weight_g is None or weight_g <= 0:
+                weight_g = k_gross
+            # Fix 1 Ducat bug or bogus pure_g
+            if pure_g is None or pure_g < 0.1 or ("ducat" in name_low):
+                pure_g = k_pure
+            break
+
+    if not matched_known:
+        # Check fractional ounce pattern in name
+        for pat, oz_wt in FRACTIONAL_OUNCES:
+            if re.search(pat, name_low):
+                if pure_g is None or pure_g <= 0:
+                    pure_g = oz_wt
+                if weight_g is None or weight_g <= 0:
+                    weight_g = oz_wt
+                if purity_pct is None:
+                    purity_pct = 99.99
+                break
+
+        # Check grams pattern in name (e.g. '5 grams', '2 grams', '1 gr.')
+        m_g = re.search(r"(\d+(?:[.,]\d+)?)\s*(?:g|gr|gram|gramme|grams|grammes)\b", name_low)
+        if m_g:
+            g_val = float(m_g.group(1).replace(",", "."))
+            if weight_g is None or weight_g <= 0:
+                weight_g = g_val
+            if pure_g is None or pure_g <= 0:
+                pure_g = g_val
+            if purity_pct is None:
+                purity_pct = 99.99 if category == "bar" else 90.0
+
+    if category == "bar" and purity_pct is None:
+        purity_pct = 99.99
+    if pure_g is None and weight_g is not None and purity_pct is not None:
+        pure_g = weight_g * purity_pct / 100.0
 
     country, flag = None, None
     for li in soup.select("#tab-features li"):
@@ -122,15 +231,22 @@ def parse_product(html: str, url: str) -> dict:
 
     cot = soup.select_one("[data-refresh-common-property=gold_cotation]")
     m = re.search(r"(\d{4}-\d{2}-\d{2})\D+(\d{2}:\d{2}:\d{2})", cot.get_text() if cot else "")
-    h1 = soup.select_one("h1[itemprop=name] span") or soup.select_one("h1")
-    name = h1.get_text(strip=True) if h1 else url.rsplit("/", 1)[-1]
-    ptype = feats.get("type of products", "").strip().lower()
+    quote_iso = None
+    if m:
+        try:
+            if BRUSSELS_TZ:
+                dt = datetime.strptime(f"{m.group(1)} {m.group(2)}", "%Y-%m-%d %H:%M:%S").replace(tzinfo=BRUSSELS_TZ)
+                quote_iso = dt.isoformat()
+            else:
+                quote_iso = f"{m.group(1)}T{m.group(2)}+01:00"
+        except Exception:
+            quote_iso = f"{m.group(1)}T{m.group(2)}+01:00"
+
     img, img_full = parse_images(soup)
 
     if not country:
-        low = name.lower()
         for k, c, f in COUNTRY_HINTS:
-            if k in low:
+            if k in name_low:
                 country = c
                 if not flag and f:
                     flag = f
@@ -138,7 +254,7 @@ def parse_product(html: str, url: str) -> dict:
 
     return {
         "name": name,
-        "category": ptype if ptype in ("bar", "coin") else ("bar" if "bar" in url else "coin"),
+        "category": category,
         "url": url,
         "image": proxied(img),
         "image_full": proxied(img_full),
@@ -152,11 +268,11 @@ def parse_product(html: str, url: str) -> dict:
         "premium_pay_pct": pct(prop("sell_bonus_final")),
         "premium_receive_pct": pct(prop("buy_bonus_final")),
         "in_stock": in_stock,
-        "quote_time": f"{m.group(1)} {m.group(2)}" if m else None,
+        "quote_time": quote_iso,
     }
 
 
-def add_derived(row: dict) -> dict:
+def add_derived(row: dict, spot_per_g: float | None = None) -> dict:
     s, b, pure, prem = row.get("shop_sells"), row.get("shop_buys"), row.get("pure_g"), row.get("premium_pay_pct")
     row["spread_pct"] = round((s - b) / s * 100, 2) if s and b else None
     row["loss_eur"] = round(s - b, 2) if s and b else None
@@ -169,6 +285,15 @@ def add_derived(row: dict) -> dict:
     row["breakeven_spot_per_g"] = round(row["implied_spot_per_g"] * (s / b), 2) if row.get("implied_spot_per_g") and s and b else None
     row["melt_spot_per_g"] = round(s / pure, 2) if s and pure else None
     row["is_collector"] = bool(prem is not None and prem >= 20.0)
+
+    # Sanity check: if sell_per_pure_g / spot_per_g is outside [0.5, 3.0], flag as suspect
+    check_spot = spot_per_g or row.get("implied_spot_per_g")
+    row["suspect"] = False
+    if row.get("sell_per_pure_g") and check_spot and check_spot > 0:
+        ratio = row["sell_per_pure_g"] / check_spot
+        if ratio < 0.5 or ratio > 3.0:
+            row["suspect"] = True
+
     return row
 
 
@@ -225,26 +350,56 @@ def run_parallel(fn, urls: list[str], workers: int):
     return ok, bad
 
 
+def get_percentile(arr: list[float], p: float) -> float:
+    """Calculate p-th percentile (0 to 100) using linear interpolation."""
+    if not arr:
+        return 0.0
+    s = sorted(arr)
+    idx = (len(s) - 1) * (p / 100.0)
+    low = int(idx)
+    high = min(low + 1, len(s) - 1)
+    weight = idx - low
+    return s[low] * (1.0 - weight) + s[high] * weight
+
+
 def compute_backend_deal_scores(rows: list[dict]):
-    """Calculate default composite deal score (0-100) combining loss %, spot premium % and pure gram cost."""
-    valid = [r for r in rows if r.get("status") == "ok" and r.get("spread_pct") is not None and r.get("sell_per_pure_g") is not None]
-    if not valid:
+    """Calculate default composite deal score (0-100) combining loss %, spot premium % and pure gram cost.
+    Normalizes over in-stock, non-suspect rows using 5th-95th percentile bounds to prevent compression."""
+    all_valid = [r for r in rows if r.get("status") == "ok" and not r.get("suspect")
+                 and r.get("spread_pct") is not None and r.get("sell_per_pure_g") is not None]
+    if not all_valid:
+        for r in rows:
+            r["deal_score"] = None
         return
-    min_loss, max_loss = min(r["spread_pct"] for r in valid), max(r["spread_pct"] for r in valid)
-    prems = [r["premium_pay_pct"] for r in valid if r.get("premium_pay_pct") is not None]
-    min_prem, max_prem = (min(prems), max(prems)) if prems else (0.0, 100.0)
-    pures = [r["sell_per_pure_g"] for r in valid if r.get("sell_per_pure_g") is not None]
-    min_pure, max_pure = (min(pures), max(pures)) if pures else (0.0, 100.0)
+
+    # Prefer in-stock items for bounds so unavailable items don't distort scale
+    in_stock_valid = [r for r in all_valid if r.get("in_stock")]
+    base = in_stock_valid if len(in_stock_valid) >= 3 else all_valid
+
+    losses = [r["spread_pct"] for r in base]
+    p5_loss, p95_loss = get_percentile(losses, 5), get_percentile(losses, 95)
+
+    prems = [r["premium_pay_pct"] for r in base if r.get("premium_pay_pct") is not None]
+    p5_prem = get_percentile(prems, 5) if prems else 0.0
+    p95_prem = get_percentile(prems, 95) if prems else 100.0
+
+    pures = [r["sell_per_pure_g"] for r in base]
+    p5_pure, p95_pure = get_percentile(pures, 5), get_percentile(pures, 95)
 
     for r in rows:
-        if r.get("status") != "ok" or r.get("spread_pct") is None:
+        if r.get("status") != "ok" or r.get("suspect") or r.get("spread_pct") is None or r.get("sell_per_pure_g") is None:
             r["deal_score"] = None
             continue
-        s_loss = 1.0 if max_loss == min_loss else 1.0 - (r["spread_pct"] - min_loss) / max(0.001, max_loss - min_loss)
-        prem = r.get("premium_pay_pct") if r.get("premium_pay_pct") is not None else max_prem
-        s_prem = 1.0 if max_prem == min_prem else 1.0 - (prem - min_prem) / max(0.001, max_prem - min_prem)
-        pure = r.get("sell_per_pure_g") if r.get("sell_per_pure_g") is not None else max_pure
-        s_pure = 1.0 if max_pure == min_pure else 1.0 - (pure - min_pure) / max(0.001, max_pure - min_pure)
+
+        v_loss = max(p5_loss, min(p95_loss, r["spread_pct"]))
+        s_loss = 1.0 if p95_loss <= p5_loss else 1.0 - (v_loss - p5_loss) / max(0.001, p95_loss - p5_loss)
+
+        prem = r.get("premium_pay_pct") if r.get("premium_pay_pct") is not None else p95_prem
+        v_prem = max(p5_prem, min(p95_prem, prem))
+        s_prem = 1.0 if p95_prem <= p5_prem else 1.0 - (v_prem - p5_prem) / max(0.001, p95_prem - p5_prem)
+
+        v_pure = max(p5_pure, min(p95_pure, r["sell_per_pure_g"]))
+        s_pure = 1.0 if p95_pure <= p5_pure else 1.0 - (v_pure - p5_pure) / max(0.001, p95_pure - p5_pure)
 
         score = round((45 * s_loss + 35 * s_prem + 20 * s_pure))
         r["deal_score"] = max(1, min(100, score))
@@ -323,22 +478,48 @@ def make_transparent_png(in_path: Path, out_path: Path, thresh: int = 45) -> boo
     return False
 
 
+_discovery_lock = threading.Lock()
+_discovery_in_progress = False
+
+
+def trigger_background_discovery(p: BrowserPool = default_pool):
+    global _discovery_in_progress
+    with _discovery_lock:
+        if _discovery_in_progress:
+            return
+        _discovery_in_progress = True
+
+    def _run():
+        global _discovery_in_progress
+        try:
+            get_products(refresh=True, p=p)
+        finally:
+            _discovery_in_progress = False
+
+    threading.Thread(target=_run, daemon=True).start()
+
+
 def get_products(refresh: bool = False, p: BrowserPool = default_pool) -> dict:
     cached = None
-    if PRODUCTS_FILE.exists():
+    if config.PRODUCTS_FILE.exists():
         try:
-            cached = json.loads(PRODUCTS_FILE.read_text(encoding="utf-8"))
-        except Exception:
+            cached = json.loads(config.PRODUCTS_FILE.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
             cached = None
-    fresh = cached and time.time() - PRODUCTS_FILE.stat().st_mtime < PRODUCTS_TTL
-    if cached and (fresh and not refresh):
+
+    if cached and not refresh:
         set_products(cached["urls"])
+        try:
+            if time.time() - config.PRODUCTS_FILE.stat().st_mtime >= config.PRODUCTS_TTL:
+                trigger_background_discovery(p)
+        except OSError:
+            pass
         return {**cached, "source": "cache"}
+
     try:
         urls = discover_urls(p)
-        data = {"urls": urls, "filter": LISTING_FILTER, "fetched_at": datetime.now().isoformat(timespec="seconds")}
-        PRODUCTS_FILE.parent.mkdir(parents=True, exist_ok=True)
-        PRODUCTS_FILE.write_text(json.dumps(data), encoding="utf-8")
+        data = {"urls": urls, "filter": config.LISTING_FILTER, "fetched_at": datetime.now().isoformat(timespec="seconds")}
+        config.atomic_write_json(config.PRODUCTS_FILE, data)
         set_products(urls)
         return {**data, "source": "site"}
     except Exception as exc:
@@ -351,31 +532,40 @@ def get_products(refresh: bool = False, p: BrowserPool = default_pool) -> dict:
 
 
 def read_cache() -> dict | None:
-    return json.loads(CACHE_FILE.read_text(encoding="utf-8")) if CACHE_FILE.exists() else None
+    if not config.CACHE_FILE.exists():
+        return None
+    try:
+        return json.loads(config.CACHE_FILE.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return None
 
 
 def is_likely_over_max_price(url: str, cached_rows: list[dict] | None = None) -> bool:
-    """Identify bullion products guaranteed to exceed MAX_PRICE (e.g. 10g-1kg bars, 1 oz coins)."""
-    low = url.lower()
-    # Bullion keywords that are well over 1000 EUR at current market rates (~113 €/g)
-    over_patterns = [
-        "1-kilo", "500-gr", "250-gr", "100-gr", "50-gr", "20-gr", "10-gr",
-        "1-ounce", "1-oz", "50x1g", "maplegram25", "10-x-1g"
-    ]
-    if any(p in low for p in over_patterns):
-        # Exclude fractional coins like 1/4 or 1/10 oz
-        if not any(frac in low for frac in ["1-4", "1-10", "quarter", "tenth", "1/4", "1/10"]):
-            return True
+    """Identify bullion products known or guaranteed to exceed MAX_PRICE."""
+    # 1. Primary check: check cached price if known
     if cached_rows:
         for r in cached_rows:
-            if r.get("url") == url and r.get("shop_sells") and r["shop_sells"] >= MAX_PRICE:
-                return True
+            if r.get("url") == url and r.get("shop_sells") is not None:
+                return r["shop_sells"] >= config.MAX_PRICE
+
+    # 2. Regex on URL slug for heavy bullion (> 10g or full 1 oz)
+    slug = url.rsplit("/", 1)[-1].lower()
+    # Bars >= 10g or 1kg
+    if re.search(r"(?:^|[-_])(1[-_]?kilo|500[-_]?gr?|250[-_]?gr?|100[-_]?gr?|50[-_]?gr?|20[-_]?gr?|10[-_]?gr?)(?:[-_.]|$)", slug):
+        return True
+    # Full 1 oz coin / bar (excluding 1/4 or 1/10 oz or 1/2)
+    if re.search(r"(?:^|[-_])(1[-_]?(?:ounce|oz))(?:[-_.]|$)", slug):
+        if not re.search(r"(?:1[-_]?[24]|1[-_]?10|quarter|tenth|half)", slug):
+            return True
+    if re.search(r"(?:^|[-_])(50x1g|maplegram25)(?:[-_.]|$)", slug):
+        return True
+
     return False
 
 
 def scrape_all(p: BrowserPool = default_pool) -> dict:
     t0 = time.time()
-    prod = get_products(p=p)
+    prod = get_products(refresh=False, p=p)
     cached_data = read_cache()
     cached_rows = cached_data.get("rows", []) if cached_data else []
 
@@ -383,17 +573,17 @@ def scrape_all(p: BrowserPool = default_pool) -> dict:
     errors: dict[str, str] = {}
 
     # Only scrape items under MAX_PRICE (low than 1000 EUR)
-    candidate_urls = [u for u in PRODUCT_URLS if not is_likely_over_max_price(u, cached_rows)]
+    candidate_urls = [u for u in config.PRODUCT_URLS if not is_likely_over_max_price(u, cached_rows)]
     pending = list(candidate_urls)
 
-    if MODE in ("http", "auto"):
-        ok, bad = run_parallel(http_task, pending, WORKERS)
+    if config.MODE in ("http", "auto"):
+        ok, bad = run_parallel(http_task, pending, config.WORKERS)
         rows_by_url.update(ok)
         pending, errors = list(bad), bad
-    if pending and MODE in ("browser", "auto"):
+    if pending and config.MODE in ("browser", "auto"):
         try:
-            p.ensure(min(WORKERS, len(pending)))
-            ok, bad = run_parallel(lambda u: browser_task(u, p), pending, min(WORKERS, len(pending)))
+            p.ensure(min(config.WORKERS, len(pending)))
+            ok, bad = run_parallel(lambda u: browser_task(u, p), pending, min(config.WORKERS, len(pending)))
             rows_by_url.update(ok)
             for u in ok:
                 errors.pop(u, None)
@@ -402,13 +592,23 @@ def scrape_all(p: BrowserPool = default_pool) -> dict:
             for u in pending:
                 errors[u] = f"{errors.get(u, '')} | browser fallback unavailable: {type(exc).__name__}: {str(exc)[:100]}"
 
+    # Get current spot for derived metrics sanity check
+    current_spot = None
+    try:
+        from spot import get_spot
+        s_info = get_spot(refresh=False, p=p)
+        if s_info and s_info.get("eur_per_g"):
+            current_spot = float(s_info["eur_per_g"])
+    except Exception:
+        pass
+
     rows = []
     for url in candidate_urls:
         pid = re.search(r"-(\d+)\.html", url).group(1)
         if url in rows_by_url:
-            row = add_derived(rows_by_url[url])
+            row = add_derived(rows_by_url[url], spot_per_g=current_spot)
             # Exclude products that cost MAX_PRICE or more
-            if row.get("shop_sells") is not None and row["shop_sells"] >= MAX_PRICE:
+            if row.get("shop_sells") is not None and row["shop_sells"] >= config.MAX_PRICE:
                 continue
             row["status"] = "ok"
         else:
@@ -420,7 +620,7 @@ def scrape_all(p: BrowserPool = default_pool) -> dict:
         rows.append(row)
 
     # Strictly retain only products lower than MAX_PRICE (1,000 EUR)
-    rows = [r for r in rows if r.get("shop_sells") is None or r.get("shop_sells") < MAX_PRICE]
+    rows = [r for r in rows if r.get("shop_sells") is None or r.get("shop_sells") < config.MAX_PRICE]
 
     compute_backend_deal_scores(rows)
 
@@ -428,16 +628,18 @@ def scrape_all(p: BrowserPool = default_pool) -> dict:
         if r.get("has_chart"):
             r["history_stats"] = calc_historical_spread_stats(r["pid"])
 
+    scraped_iso = datetime.now(BRUSSELS_TZ).isoformat(timespec="seconds") if BRUSSELS_TZ else datetime.now().isoformat(timespec="seconds")
+
     result = {
-        "scraped_at": datetime.now().isoformat(timespec="seconds"),
-        "elapsed_s": round(time.time() - t0, 2), "mode": MODE, "workers": WORKERS,
-        "max_price": MAX_PRICE,
+        "scraped_at": scraped_iso,
+        "elapsed_s": round(time.time() - t0, 2), "mode": config.MODE, "workers": config.WORKERS,
+        "max_price": config.MAX_PRICE,
         "count": len(rows), "ok": sum(r["status"] == "ok" for r in rows),
         "via": {v: sum(r.get("via") == v for r in rows) for v in ("http", "browser")},
         "products": {"count": len(candidate_urls), "source": prod.get("source"), "error": prod.get("error")},
         "rows": rows,
     }
-    CACHE_FILE.write_text(json.dumps(result, ensure_ascii=False, indent=1), encoding="utf-8")
+    config.atomic_write_json(config.CACHE_FILE, result)
     return result
 
 
@@ -454,7 +656,7 @@ BULLIONBYPOST_BENCHMARKS = [
         "name": "Full Sovereign",
         "category": "coin",
         "url": "https://www.bullionbypost.eu/gold-coins/full-sovereign-gold-coin/",
-        "match_keywords": ["sovereign", "1 sovereign"],
+        "match_keywords": ["sovereign", "1 sovereign", "full sovereign"],
         "weight_g": 7.988,
         "pure_g": 7.3224,
     },
@@ -494,32 +696,45 @@ BULLIONBYPOST_BENCHMARKS = [
 
 
 def fetch_competitor_benchmarks(refresh: bool = False) -> dict:
-    if not refresh and COMPETITORS_FILE.exists():
+    if not refresh and config.COMPETITORS_FILE.exists():
         try:
-            cached = json.loads(COMPETITORS_FILE.read_text(encoding="utf-8"))
+            cached = json.loads(config.COMPETITORS_FILE.read_text(encoding="utf-8"))
             if time.time() - cached.get("timestamp", 0) < 3600:
                 return cached
-        except Exception:
+        except (json.JSONDecodeError, OSError):
             pass
 
     cached_scrape = read_cache() or {"rows": []}
     gf_rows = [r for r in cached_scrape.get("rows", []) if r.get("status") == "ok" and r.get("shop_sells")]
 
+    approx_spot = 113.0
+    try:
+        from spot import get_spot
+        s_data = get_spot(False)
+        if s_data and s_data.get("eur_per_g"):
+            approx_spot = float(s_data["eur_per_g"])
+    except Exception:
+        pass
+
     results = []
     sess = get_session()
     for bm in BULLIONBYPOST_BENCHMARKS:
+        # Match primarily on pure_g within 2% AND category (coin vs bar)
+        candidates = [
+            r for r in gf_rows
+            if r.get("category") == bm["category"]
+            and r.get("pure_g")
+            and abs(r["pure_g"] - bm["pure_g"]) / bm["pure_g"] <= 0.02
+        ]
         gf_match = None
-        for r in gf_rows:
-            name_low = r["name"].lower()
-            if any(k in name_low for k in bm["match_keywords"]):
-                if bm["category"] == r.get("category"):
-                    gf_match = r
-                    break
-        if not gf_match:
-            for r in gf_rows:
-                if bm["category"] == r.get("category") and r.get("pure_g") and abs(r["pure_g"] - bm["pure_g"]) < 0.2:
-                    gf_match = r
-                    break
+        if candidates:
+            def match_score(r):
+                nl = r["name"].lower()
+                kw_hits = sum(1 for kw in bm.get("match_keywords", []) if kw in nl)
+                diff = abs(r["pure_g"] - bm["pure_g"])
+                return (-kw_hits, diff)
+            candidates.sort(key=match_score)
+            gf_match = candidates[0]
 
         bbp_price = None
         try:
@@ -535,7 +750,6 @@ def fetch_competitor_benchmarks(refresh: bool = False) -> dict:
                             candidates.append(p_val)
 
                 # Filter candidate prices to single item range (exclude 10-packs or 100-pack monster boxes)
-                approx_spot = 113.0
                 approx_metal = bm["pure_g"] * approx_spot
                 valid_candidates = [p for p in candidates if 0.65 * approx_metal <= p <= 2.2 * approx_metal]
                 if valid_candidates:
@@ -574,11 +788,10 @@ def fetch_competitor_benchmarks(refresh: bool = False) -> dict:
 
     data = {
         "timestamp": time.time(),
-        "fetched_at": datetime.now().isoformat(timespec="seconds"),
+        "fetched_at": datetime.now(BRUSSELS_TZ).isoformat(timespec="seconds") if BRUSSELS_TZ else datetime.now().isoformat(timespec="seconds"),
         "benchmarks": results,
     }
-    COMPETITORS_FILE.parent.mkdir(parents=True, exist_ok=True)
-    COMPETITORS_FILE.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    config.atomic_write_json(config.COMPETITORS_FILE, data)
     return data
 
 

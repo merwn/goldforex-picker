@@ -13,7 +13,7 @@ import time
 from urllib.parse import urlparse
 
 import requests
-from fastapi import FastAPI
+from fastapi import FastAPI, Request, Response
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -34,6 +34,18 @@ app = FastAPI(title="GoldForex picker")
 app.mount("/static", StaticFiles(directory=str(config.STATIC_DIR)), name="static")
 
 _lock = threading.Lock()
+_last_scrape_time = 0.0
+
+
+def _prepare_cached_rows(cached: dict) -> dict:
+    cached_rows = [r for r in cached.get("rows", []) if r.get("shop_sells") is None or r.get("shop_sells") < config.MAX_PRICE]
+    cached["rows"] = cached_rows
+    cached["count"] = len(cached_rows)
+    for r in cached["rows"]:
+        r["has_chart"] = (config.CHART_DIR / f"{r['pid']}.json").exists()
+        if r["has_chart"]:
+            r["history_stats"] = calc_historical_spread_stats(r["pid"])
+    return cached
 
 
 @app.get("/")
@@ -43,18 +55,33 @@ def index():
 
 @app.get("/api/prices")
 def api_prices(refresh: int = 0):
+    global _last_scrape_time
     with _lock:
         cached = read_cache()
-        if not refresh and cached and time.time() - config.CACHE_FILE.stat().st_mtime < config.CACHE_TTL:
-            cached_rows = [r for r in cached.get("rows", []) if r.get("shop_sells") is None or r.get("shop_sells") < config.MAX_PRICE]
-            cached["rows"] = cached_rows
-            cached["count"] = len(cached_rows)
-            for r in cached["rows"]:
-                r["has_chart"] = (config.CHART_DIR / f"{r['pid']}.json").exists()
-                if r["has_chart"]:
-                    r["history_stats"] = calc_historical_spread_stats(r["pid"])
-            return JSONResponse(cached)
-        return JSONResponse(scrape_all(pool))
+        now = time.time()
+        is_fresh = cached and (now - config.CACHE_FILE.stat().st_mtime < config.CACHE_TTL)
+
+        if not refresh and is_fresh:
+            return JSONResponse(_prepare_cached_rows(cached))
+
+        # Enforce minimum 5 minutes (300s) between forced full scrapes
+        if refresh and cached and (now - _last_scrape_time < 300):
+            res = _prepare_cached_rows(cached)
+            res["rate_limited"] = True
+            return JSONResponse(res)
+
+        try:
+            data = scrape_all(pool)
+            _last_scrape_time = now
+            return JSONResponse(data)
+        except Exception as exc:
+            err_msg = f"{type(exc).__name__}: {str(exc)[:200]}"
+            if cached:
+                res = _prepare_cached_rows(cached)
+                res["stale"] = True
+                res["error"] = err_msg
+                return JSONResponse(res, status_code=502)
+            return JSONResponse({"error": err_msg}, status_code=502)
 
 
 @app.get("/manifest.json")
@@ -90,11 +117,27 @@ def api_chart(pid: str, refresh: int = 0):
 
 
 @app.get("/api/settings")
-def api_settings(silent: int = -1):
-    """Read (no argument) or change (?silent=1/0) the Silent browsing setting; open Chrome windows are closed so it applies at once."""
-    if silent in (0, 1):
-        changed = bool(silent) != config.HEADLESS
-        config.HEADLESS = bool(silent)
+def api_settings_get():
+    """Read current Silent browsing setting."""
+    return {"silent": config.HEADLESS}
+
+
+@app.post("/api/settings")
+async def api_settings_post(request: Request, silent: int = -1):
+    """Change the Silent browsing setting; open Chrome windows are closed so it applies at once."""
+    val = silent
+    if val not in (0, 1):
+        try:
+            body = await request.json()
+            if "silent" in body:
+                val = 1 if body["silent"] else 0
+        except Exception:
+            pass
+
+    if val in (0, 1):
+        target = bool(val)
+        changed = target != config.HEADLESS
+        config.HEADLESS = target
         config.save_settings()
         if changed:
             pool.reset()
@@ -122,7 +165,7 @@ def api_spot(refresh: int = 0):
         return JSONResponse({"error": f"{type(exc).__name__}: {str(exc)[:200]}"}, status_code=502)
 
 
-@app.get("/api/charts/refresh")
+@app.post("/api/charts/refresh")
 def api_charts_refresh():
     """Load every product's history in parallel (one Chrome window per worker)."""
     try:
@@ -183,7 +226,7 @@ def lwc_js():
 
 
 @app.get("/api/export.csv")
-def api_csv():
+def api_csv(locale: str = "us"):
     data = read_cache() or {"rows": []}
     cols = [
         "name", "category", "in_stock", "weight_g", "purity_pct", "karat", "country", "pure_g", "shop_sells", "shop_buys",
@@ -191,10 +234,30 @@ def api_csv():
         "premium_pay_pct", "premium_receive_pct",
         "sell_per_pure_g", "buy_per_pure_g", "implied_spot_per_g", "quote_time", "status", "url",
     ]
+    is_eu = locale.lower() == "eu"
+    delimiter = ";" if is_eu else ","
     buf = io.StringIO()
-    w = csv.DictWriter(buf, fieldnames=cols, extrasaction="ignore")
+    w = csv.DictWriter(buf, fieldnames=cols, extrasaction="ignore", delimiter=delimiter)
     w.writeheader()
-    w.writerows(data.get("rows", []))
-    return PlainTextResponse(buf.getvalue(), media_type="text/csv",
-                             headers={"Content-Disposition": "attachment; filename=goldforex.csv"})
+    rows = data.get("rows", [])
+    if is_eu:
+        formatted_rows = []
+        for r in rows:
+            new_r = {}
+            for k in cols:
+                v = r.get(k, "")
+                if isinstance(v, float):
+                    new_r[k] = str(v).replace(".", ",")
+                else:
+                    new_r[k] = "" if v is None else v
+            formatted_rows.append(new_r)
+        w.writerows(formatted_rows)
+    else:
+        formatted_rows = []
+        for r in rows:
+            formatted_rows.append({k: ("" if r.get(k) is None else r.get(k)) for k in cols})
+        w.writerows(formatted_rows)
+    csv_bytes = buf.getvalue().encode("utf-8-sig")
+    return Response(content=csv_bytes, media_type="text/csv; charset=utf-8",
+                    headers={"Content-Disposition": "attachment; filename=goldforex.csv"})
 

@@ -103,26 +103,56 @@ function calcBreakevenSpot(r) {
   return s * (r.shop_sells / r.shop_buys);
 }
 
+function getPercentile(arr, p) {
+  if (!arr.length) return 0;
+  const sorted = [...arr].sort((a, b) => a - b);
+  const idx = (sorted.length - 1) * (p / 100);
+  const low = Math.floor(idx);
+  const high = Math.ceil(idx);
+  const weight = idx - low;
+  return sorted[low] * (1 - weight) + sorted[high] * weight;
+}
+
 function computeDealScores() {
-  const valid = rows.filter(r => r.status === "ok" && r.spread_pct != null && r.sell_per_pure_g != null);
-  if (!valid.length) return;
-  const minLoss = Math.min(...valid.map(r => r.spread_pct)), maxLoss = Math.max(...valid.map(r => r.spread_pct));
-  const prems = valid.map(r => r.premium_pay_pct).filter(v => v != null);
-  const minPrem = prems.length ? Math.min(...prems) : 0, maxPrem = prems.length ? Math.max(...prems) : 100;
-  const minPure = Math.min(...valid.map(r => r.sell_per_pure_g)), maxPure = Math.max(...valid.map(r => r.sell_per_pure_g));
-  const totW = (dealWeights.loss || 0) + (dealWeights.prem || 0) + (dealWeights.pure || 0) || 100;
+  const allValid = rows.filter(r => r.status === "ok" && !r.suspect && r.spread_pct != null && r.sell_per_pure_g != null);
+  if (!allValid.length) {
+    for (const r of rows) r.deal_score = null;
+    return;
+  }
+  const inStockValid = allValid.filter(r => r.in_stock);
+  const base = inStockValid.length >= 3 ? inStockValid : allValid;
+
+  const losses = base.map(r => r.spread_pct);
+  const p5Loss = getPercentile(losses, 5), p95Loss = getPercentile(losses, 95);
+
+  const prems = base.map(r => r.premium_pay_pct).filter(v => v != null);
+  const p5Prem = prems.length ? getPercentile(prems, 5) : 0, p95Prem = prems.length ? getPercentile(prems, 95) : 100;
+
+  const pures = base.map(r => r.sell_per_pure_g);
+  const p5Pure = getPercentile(pures, 5), p95Pure = getPercentile(pures, 95);
+
+  const wLoss = Number.isFinite(+dealWeights.loss) ? +dealWeights.loss : 45;
+  const wPrem = Number.isFinite(+dealWeights.prem) ? +dealWeights.prem : 35;
+  const wPure = Number.isFinite(+dealWeights.pure) ? +dealWeights.pure : 20;
+  const totW = (wLoss + wPrem + wPure) || 100;
 
   for (const r of rows) {
-    if (r.status !== "ok" || r.spread_pct == null) {
+    if (r.status !== "ok" || r.suspect || r.spread_pct == null || r.sell_per_pure_g == null) {
       r.deal_score = null;
       continue;
     }
-    const sLoss = maxLoss === minLoss ? 1 : 1 - (r.spread_pct - minLoss) / Math.max(0.01, maxLoss - minLoss);
-    const p = r.premium_pay_pct != null ? r.premium_pay_pct : maxPrem;
-    const sPrem = maxPrem === minPrem ? 1 : 1 - (p - minPrem) / Math.max(0.01, maxPrem - minPrem);
-    const sPure = maxPure === minPure ? 1 : 1 - (r.sell_per_pure_g - minPure) / Math.max(0.01, maxPure - minPure);
-    const score = ((dealWeights.loss * sLoss) + (dealWeights.prem * sPrem) + (dealWeights.pure * sPure)) / totW * 100;
-    r.deal_score = Math.max(1, Math.min(100, Math.round(score)));
+    const vLoss = Math.max(p5Loss, Math.min(p95Loss, r.spread_pct));
+    const sLoss = p95Loss <= p5Loss ? 1 : 1 - (vLoss - p5Loss) / Math.max(0.001, p95Loss - p5Loss);
+
+    const prem = r.premium_pay_pct != null ? r.premium_pay_pct : p95Prem;
+    const vPrem = Math.max(p5Prem, Math.min(p95Prem, prem));
+    const sPrem = p95Prem <= p5Prem ? 1 : 1 - (vPrem - p5Prem) / Math.max(0.001, p95Prem - p5Prem);
+
+    const vPure = Math.max(p5Pure, Math.min(p95Pure, r.sell_per_pure_g));
+    const sPure = p95Pure <= p5Pure ? 1 : 1 - (vPure - p5Pure) / Math.max(0.001, p95Pure - p5Pure);
+
+    const score = Math.round(((wLoss * sLoss) + (wPrem * sPrem) + (wPure * sPure)) / totW * 100);
+    r.deal_score = Math.max(1, Math.min(100, score));
   }
 }
 
@@ -136,12 +166,12 @@ function updateDataAge() {
     badge.style.display = "none";
     return;
   }
-  const d = new Date(first.quote_time.replace(" ", "T"));
-  const diffM = Math.round((Date.now() - d.getTime()) / 60000);
+  const d = new Date(first.quote_time.includes("T") ? first.quote_time : first.quote_time.replace(" ", "T"));
+  const diffM = Math.max(0, Math.round((Date.now() - d.getTime()) / 60000));
   badge.style.display = "inline-block";
   if (diffM <= 15) {
     badge.className = "b-age b-live";
-    badge.textContent = `● Live (${diffM}m ago)`;
+    badge.textContent = `● Live (${diffM === 0 ? "just now" : diffM + "m ago"})`;
   } else if (diffM <= 60) {
     badge.className = "b-age b-stale";
     badge.textContent = `● Quotes ${diffM}m ago`;
@@ -322,6 +352,7 @@ function card(r, best, cheap) {
   const histBadge = r.history_stats ? `<span class="badge ${r.history_stats.status === 'bargain' ? 'b-bargain' : r.history_stats.status === 'fair' ? 'b-fair' : 'b-high'}" title="52W spread range: ${r.history_stats.min_52w}% - ${r.history_stats.max_52w}% (cheaper than ${r.history_stats.cheaper_than_pct}% of the past year)">${esc(r.history_stats.badge)}</span>` : "";
 
   const badges = (r.status !== "ok" ? '<span class="badge b-out">failed</span>' : r.in_stock ? '<span class="badge b-in">In stock</span>' : '<span class="badge b-out">Out of stock</span>') +
+    (r.suspect ? '<span class="badge b-high" title="Implausible price/weight ratio">⚠️ Suspect</span>' : "") +
     (r.deal_score != null ? `<span class="badge b-score ${dealScoreCls(r.deal_score)}">Score ${r.deal_score}</span>` : "") +
     histBadge +
     (isCollector ? `<span class="badge b-collector" title="Collector / Numismatic premium: ${num(r.premium_pay_pct)}% markup over metal value">⚠️ Collector (+${num(r.premium_pay_pct)}%)</span>` : "") +
@@ -402,7 +433,7 @@ function render() {
         return `<tr id="row-${esc(r.pid)}">
     <td style="text-align:center"><button class="fav-btn ${isFav ? "active" : ""}" style="position:static;display:inline-flex;width:26px;height:26px;font-size:14px" data-fav="${esc(r.pid)}">${isFav ? "★" : "☆"}</button></td>
     <td style="text-align:center"><button class="cmp-btn ${isCmp ? "active" : ""}" style="position:static;display:inline-flex;width:26px;height:26px;font-size:13px" data-cmp="${esc(r.pid)}" title="Compare">⚖️</button></td>
-    <td>${r.image ? `<img src="${esc(r.image)}" alt="">` : ""}<a href="${esc(r.url)}" target="_blank" rel="noopener">${esc(r.name)}</a></td>
+    <td>${r.image ? `<img src="${esc(r.image)}" alt="">` : ""}<a href="${esc(r.url)}" target="_blank" rel="noopener">${esc(r.name)}</a>${r.suspect ? ' <span class="badge b-high" style="font-size:10px" title="Implausible price/weight ratio">⚠️ Suspect</span>' : ""}</td>
     <td>${r.in_stock ? "yes" : '<span class="c-r">no</span>'}</td>
     <td><span class="badge b-score ${dealScoreCls(r.deal_score)}">${r.deal_score || "-"}</span></td>
     <td>${histBadge}</td>
@@ -1388,15 +1419,35 @@ function renderAlertsManager() {
 // Data Loading
 // --------------------------------------------------------------------------
 async function load(refresh) {
-  $("meta").textContent = "scraping...";
+  $("meta").textContent = refresh ? "scraping..." : "loading cached data...";
   $("refresh").disabled = true;
   try {
-    const d = await (await fetch("/api/prices?refresh=" + (refresh ? 1 : 0))).json();
+    const res = await fetch("/api/prices?refresh=" + (refresh ? 1 : 0));
+    const d = await res.json();
+    if (!res.ok || d.error) {
+      const e = $("err");
+      e.style.display = "block";
+      e.textContent = d.error || ("HTTP error " + res.status);
+      if (!d.rows) {
+        $("meta").textContent = "Error: " + (d.error || res.statusText);
+        $("refresh").disabled = false;
+        return;
+      }
+    }
     rows = d.rows || [];
-    $("meta").textContent = `${d.ok}/${d.count} ok in ${d.elapsed_s}s (http ${d.via.http}, browser ${d.via.browser}) - ${d.scraped_at.replace("T", " ")}`;
+    const httpCount = d.via?.http ?? 0;
+    const browserCount = d.via?.browser ?? 0;
+    const okCount = d.ok ?? rows.filter(r => r.status === "ok").length;
+    const totalCount = d.count ?? rows.length;
+    const elapsed = d.elapsed_s != null ? d.elapsed_s + "s" : "";
+    const scrapedAt = (d.scraped_at || "").replace("T", " ");
+    const staleTag = d.stale ? " [stale cache]" : "";
+    $("meta").textContent = `${okCount}/${totalCount} ok${elapsed ? " in " + elapsed : ""} (http ${httpCount}, browser ${browserCount}) - ${scrapedAt}${staleTag}`;
     const bad = rows.filter(r => r.status !== "ok"), e = $("err");
-    e.style.display = bad.length ? "block" : "none";
-    e.textContent = bad.map(r => r.name + ": " + r.error).join("\n");
+    if (!d.error) {
+      e.style.display = bad.length ? "block" : "none";
+      e.textContent = bad.map(r => r.name + ": " + r.error).join("\n");
+    }
     updateCountryOptions();
     updateDataAge();
     computeDealScores();
@@ -1404,6 +1455,9 @@ async function load(refresh) {
     render();
   } catch (x) {
     $("meta").textContent = "error: " + x;
+    const e = $("err");
+    e.style.display = "block";
+    e.textContent = String(x);
   }
   $("refresh").disabled = false;
 }
@@ -1616,7 +1670,12 @@ document.addEventListener("click", e => {
 $("silent").onchange = async e => {
   const on = e.target.checked;
   try {
-    const d = await (await fetch("/api/settings?silent=" + (on ? 1 : 0))).json();
+    const res = await fetch("/api/settings", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ silent: on ? 1 : 0 })
+    });
+    const d = await res.json();
     e.target.checked = !!d.silent;
   } catch (x) {
     e.target.checked = !on;
@@ -1733,9 +1792,9 @@ $("sw-log").onchange = renderSweetSpotChart;
 
 // Weights modal handling
 $("weights-btn").onclick = () => {
-  $("w-loss").value = dealWeights.loss || 45;
-  $("w-prem").value = dealWeights.prem || 35;
-  $("w-pure").value = dealWeights.pure || 20;
+  $("w-loss").value = Number.isFinite(+dealWeights.loss) ? dealWeights.loss : 45;
+  $("w-prem").value = Number.isFinite(+dealWeights.prem) ? dealWeights.prem : 35;
+  $("w-pure").value = Number.isFinite(+dealWeights.pure) ? dealWeights.pure : 20;
   $("w-loss-val").textContent = $("w-loss").value + "%";
   $("w-prem-val").textContent = $("w-prem").value + "%";
   $("w-pure-val").textContent = $("w-pure").value + "%";
@@ -1763,13 +1822,14 @@ $("w-reset").onclick = () => {
 
 $("w-save").onclick = () => {
   dealWeights = {
-    loss: +($("w-loss").value) || 45,
-    prem: +($("w-prem").value) || 35,
-    pure: +($("w-pure").value) || 20
+    loss: Number.isFinite(+($("w-loss").value)) ? +($("w-loss").value) : 45,
+    prem: Number.isFinite(+($("w-prem").value)) ? +($("w-prem").value) : 35,
+    pure: Number.isFinite(+($("w-pure").value)) ? +($("w-pure").value) : 20
   };
   localStorage.setItem("gf_deal_weights", JSON.stringify(dealWeights));
   $("weights-modal").style.display = "none";
   showToast("Weights Updated", "Deal scores recomputed with custom weights");
+  computeDealScores();
   render();
 };
 
@@ -1945,7 +2005,7 @@ $("dealer-refresh").onclick = () => openDealerModal(true);
 let timer = null;
 $("auto").onchange = e => {
   clearInterval(timer);
-  if (e.target.checked) timer = setInterval(() => load(true), 60000);
+  if (e.target.checked) timer = setInterval(() => { load(false); loadSpot(false); }, 60000);
 };
 
 // Initial page data load

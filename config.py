@@ -4,6 +4,7 @@ Configuration, constants, file paths, and settings for the GoldForex application
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from urllib.parse import quote
 import re
@@ -68,7 +69,7 @@ HTTP_TIMEOUT = 20
 HTTP_RETRIES = 2
 BROWSER_TIMEOUT = 20       # Seconds to wait for price element in browser
 CHART_TIMEOUT = 30         # Seconds to wait for Highcharts data
-CACHE_TTL = 60             # Seconds cached price scrape is reused
+CACHE_TTL = 300            # Seconds cached price scrape is reused (5 minutes)
 CHART_TTL = 6 * 3600       # Seconds cached chart history is reused
 PRODUCTS_TTL = 12 * 3600   # Seconds before product list is re-read from site
 SPOT_TTL = 60              # Seconds cached spot price is reused
@@ -150,18 +151,28 @@ def proxied(url: str | None) -> str | None:
     return f"/api/img?u={quote(url, safe='')}" if url else None
 
 
+def atomic_write_json(path: Path | str, data: any, indent: int | None = 2) -> None:
+    """Write data to temporary file first, then atomically replace target file."""
+    p = Path(path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    tmp = p.with_name(f"{p.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+    text = json.dumps(data, ensure_ascii=False, indent=indent)
+    tmp.write_text(text, encoding="utf-8")
+    os.replace(tmp, p)
+
+
 def load_settings():
     global HEADLESS
     try:
-        HEADLESS = bool(json.loads(SETTINGS_FILE.read_text(encoding="utf-8")).get("silent", True))
+        if SETTINGS_FILE.exists():
+            HEADLESS = bool(json.loads(SETTINGS_FILE.read_text(encoding="utf-8")).get("silent", True))
     except Exception:
         pass
 
 
 def save_settings():
     try:
-        SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
-        SETTINGS_FILE.write_text(json.dumps({"silent": HEADLESS}), encoding="utf-8")
+        atomic_write_json(SETTINGS_FILE, {"silent": HEADLESS})
     except Exception:
         pass
 

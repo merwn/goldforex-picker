@@ -14,16 +14,14 @@ from datetime import datetime
 
 from bs4 import BeautifulSoup
 
+import config
 from config import (
     CHART_DIR,
     CHART_TIMEOUT,
     CHART_TTL,
-    HEADLESS,
-    LISTING_FILTER,
     LISTING_PAGES,
     LISTING_URL,
     PID_URL,
-    USE_UC,
     BlockedError,
     ParseError,
 )
@@ -39,17 +37,17 @@ class BrowserPool:
         self.gen = 0
 
     def _make(self):
-        if USE_UC:
+        if config.USE_UC:
             import undetected_chromedriver as uc
             opts = uc.ChromeOptions()
-            if HEADLESS:
+            if config.HEADLESS:
                 opts.add_argument("--headless=new")
             opts.page_load_strategy = "eager"
             drv = uc.Chrome(options=opts)
         else:
             from selenium import webdriver
             opts = webdriver.ChromeOptions()
-            if HEADLESS:
+            if config.HEADLESS:
                 opts.add_argument("--headless=new")
             opts.page_load_strategy = "eager"
             for a in ("--window-size=1280,900", "--lang=en-US", "--disable-blink-features=AutomationControlled"):
@@ -58,6 +56,14 @@ class BrowserPool:
             opts.add_experimental_option("useAutomationExtension", False)
             opts.add_experimental_option("prefs", {"profile.managed_default_content_settings.images": 2})
             drv = webdriver.Chrome(options=opts)
+
+        # Set timeouts on the driver to prevent hung page loads
+        try:
+            drv.set_page_load_timeout(30)
+            drv.set_script_timeout(30)
+        except Exception:
+            pass
+
         try:
             drv.execute_cdp_cmd("Network.enable", {})
             drv.execute_cdp_cmd("Network.setBlockedURLs", {"urls": [
@@ -65,7 +71,7 @@ class BrowserPool:
                 "*.mp4", "*google-analytics*", "*googletagmanager*", "*doubleclick*", "*facebook*", "*hotjar*"]})
         except Exception:
             pass
-        if HEADLESS:
+        if config.HEADLESS:
             try:
                 ua = drv.execute_cdp_cmd("Browser.getVersion", {})["userAgent"].replace("HeadlessChrome", "Chrome")
                 drv.execute_cdp_cmd("Network.setUserAgentOverride", {"userAgent": ua})
@@ -111,22 +117,31 @@ class BrowserPool:
     @contextmanager
     def borrow(self):
         """Lend out a driver; swap in a fresh one if it crashed."""
-        drv = self.q.get()
+        try:
+            drv = self.q.get(timeout=60)
+        except queue.Empty:
+            raise TimeoutError("No available Chrome browser in pool within 60s")
+
         try:
             yield drv
         except (BlockedError, ParseError):
             raise
         except Exception:
-            drv = self.replace(drv)
+            try:
+                drv = self.replace(drv)
+            except Exception:
+                # If replace fails, do not put dead driver back in the queue
+                drv = None
             raise
         finally:
-            if getattr(drv, "_gen", self.gen) != self.gen:
-                try:
-                    drv.quit()
-                except Exception:
-                    pass
-            else:
-                self.q.put(drv)
+            if drv is not None:
+                if getattr(drv, "_gen", self.gen) != self.gen:
+                    try:
+                        drv.quit()
+                    except Exception:
+                        pass
+                else:
+                    self.q.put(drv)
 
     def close(self):
         for d in self.all:
@@ -225,16 +240,22 @@ def get_chart(pid: str, refresh: bool = False, p: BrowserPool = pool) -> dict:
         return path.exists() and time.time() - path.stat().st_mtime < CHART_TTL
 
     if fresh() and not refresh:
-        return json.loads(path.read_text(encoding="utf-8"))
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            pass
+
     with _chart_locks_guard:
         lock = _chart_locks.setdefault(pid, threading.Lock())
     with lock:
         if not refresh and fresh():
-            return json.loads(path.read_text(encoding="utf-8"))
+            try:
+                return json.loads(path.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                pass
         data = fetch_chart(url, p)
         data["pid"] = pid
-        CHART_DIR.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(data), encoding="utf-8")
+        config.atomic_write_json(path, data)
         return data
 
 
@@ -250,7 +271,7 @@ def listing_links(html: str) -> list[str]:
 
 
 def listing_hash(page: int) -> str:
-    parts = [LISTING_FILTER] if LISTING_FILTER else []
+    parts = [config.LISTING_FILTER] if config.LISTING_FILTER else []
     if page > 1:
         parts.append(f"page-{page}")
     return "#/" + "/".join(parts) if parts else "#"
@@ -271,7 +292,7 @@ def discover_urls(p: BrowserPool = pool) -> list[str]:
         def ready(d):
             links = listing_links(d.page_source)
             ok = (links and links != prev and not d.execute_script(busy_js)
-                  and (not LISTING_FILTER or d.execute_script(filt_js)))
+                  and (not config.LISTING_FILTER or d.execute_script(filt_js)))
             if ok and state["last"] == links:
                 return links
             state["last"] = links if ok else None
